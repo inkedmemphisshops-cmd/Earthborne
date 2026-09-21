@@ -90,7 +90,7 @@ final class Earthborne_Automation
 
     private function checkbox(string $name, string $label, bool $default): void
     {
-        printf('<tr><th scope="row">%1$s</th><td><label><input name="%2$s" type="checkbox" value="1" %3$s> Enabled</label></td></tr>', esc_html($label), esc_attr($name), checked((bool) get_option($name, $default), true, false));
+        printf('<tr><th scope="row">%1$s</th><td><input name="%2$s" type="hidden" value="0"><label><input name="%2$s" type="checkbox" value="1" %3$s> Enabled</label></td></tr>', esc_html($label), esc_attr($name), checked((bool) get_option($name, $default), true, false));
     }
 
     public function manual_sync(): void
