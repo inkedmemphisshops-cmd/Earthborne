@@ -127,6 +127,7 @@ final class Earthborne_Stuller_Mapper
             'ring_sizable' => (bool) ($item['RingSizable'] ?? false),
             'ring_size' => isset($item['RingSize']) ? (float) $item['RingSize'] : null,
             'ring_sizes' => $this->ring_sizes($item),
+            'ring_size_options' => $this->ring_size_options($item),
             'configuration_model_id' => isset($item['ConfigurationModelId']) ? (int) $item['ConfigurationModelId'] : null,
             'configuration' => is_array($item['ConfigurationModel'] ?? null) ? $item['ConfigurationModel'] : [],
             'ready_to_wear' => (bool) ($item['ReadyToWear'] ?? false),
@@ -269,9 +270,27 @@ final class Earthborne_Stuller_Mapper
 
     private function ring_sizes(array $item): array
     {
+        return array_values(array_map(
+            static fn(array $option): float => (float) $option['size'],
+            $this->ring_size_options($item)
+        ));
+    }
+
+    private function ring_size_options(array $item): array
+    {
         $result = [];
-        foreach (($item['ConfigurationModel']['RingSizeOptions'] ?? []) as $option) if (is_array($option) && isset($option['Size'])) $result[] = (float) $option['Size'];
-        return array_values(array_unique($result));
+        foreach (($item['ConfigurationModel']['RingSizeOptions'] ?? []) as $option) {
+            if (!is_array($option) || !isset($option['Size']) || !is_numeric($option['Size'])) continue;
+            $size = (float) $option['Size'];
+            $key = rtrim(rtrim(number_format($size, 2, '.', ''), '0'), '.');
+            $result[$key] = [
+                'size' => $size,
+                'surcharge' => max(0.0, $this->money($option['Price'] ?? null) ?? 0.0),
+                'stocked' => (bool) ($option['IsStockedSize'] ?? false),
+            ];
+        }
+        uksort($result, static fn(string $a, string $b): int => (float) $a <=> (float) $b);
+        return array_values($result);
     }
 
     private function money(mixed $value): ?float

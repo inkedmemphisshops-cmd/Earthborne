@@ -198,7 +198,8 @@ final class Earthborne_Automation
 
     private function save_ring_product(array $row, int $existing_id): int
     {
-        $sizes = $this->normalized_ring_sizes($row);
+        $size_options = $this->normalized_ring_size_options($row);
+        $sizes = array_keys($size_options);
         if ($sizes === []) throw new RuntimeException('Ring has no selectable sizes.');
 
         if ($existing_id) {
@@ -229,18 +230,26 @@ final class Earthborne_Automation
             if ($size !== '') $existing[$size] = $variation;
         }
 
+        $markup = max(1.0, (float) get_option('earthborne_markup', 2.0));
         foreach ($sizes as $size) {
+            $option = $size_options[$size];
+            $surcharge = (float) $option['surcharge'];
+            $merchandise_cost = (float) $row['cost'];
+            $variation_price = round(($merchandise_cost * $markup) + $surcharge, 2);
             $variation = $existing[$size] ?? new WC_Product_Variation();
             $variation->set_parent_id($product_id);
             $variation->set_status('publish');
             $variation->set_attributes(['ring-size' => $size]);
-            $variation->set_regular_price((string) $row['retail']);
+            $variation->set_regular_price((string) $variation_price);
             $variation->set_manage_stock(false);
             $variation->set_stock_status('instock');
             $variation->update_meta_data('_earthborne_managed', 'yes');
             $variation->update_meta_data('_earthborne_stuller_sku', $row['sku']);
             $variation->update_meta_data('_earthborne_ring_size', $size);
-            $variation->update_meta_data('_earthborne_source_cost', $row['cost']);
+            $variation->update_meta_data('_earthborne_ring_size_surcharge', $surcharge);
+            $variation->update_meta_data('_earthborne_stuller_service_cost', $surcharge);
+            $variation->update_meta_data('_earthborne_ring_size_stocked', !empty($option['stocked']) ? 'yes' : 'no');
+            $variation->update_meta_data('_earthborne_source_cost', $merchandise_cost);
             $variation->save();
         }
 
@@ -275,6 +284,7 @@ final class Earthborne_Automation
         $product->update_meta_data('_earthborne_stuller_attributes', $row['attributes']);
         $product->update_meta_data('_earthborne_stuller_images', $row['images']);
         $product->update_meta_data('_earthborne_ring_sizes', $row['ring_sizes'] ?? []);
+        $product->update_meta_data('_earthborne_ring_size_options', $row['ring_size_options'] ?? []);
         $product->update_meta_data('_earthborne_last_sync_utc', gmdate('c'));
     }
 
@@ -291,16 +301,28 @@ final class Earthborne_Automation
 
     private function normalized_ring_sizes(array $row): array
     {
-        $sizes = [];
-        foreach (($row['ring_sizes'] ?? []) as $size) {
-            if (!is_numeric($size)) continue;
-            $number = (float) $size;
+        return array_keys($this->normalized_ring_size_options($row));
+    }
+
+    private function normalized_ring_size_options(array $row): array
+    {
+        $options = [];
+        $source = !empty($row['ring_size_options']) && is_array($row['ring_size_options'])
+            ? $row['ring_size_options']
+            : array_map(static fn($size): array => ['size' => $size, 'surcharge' => 0, 'stocked' => false], $row['ring_sizes'] ?? []);
+
+        foreach ($source as $option) {
+            if (!is_array($option) || !isset($option['size']) || !is_numeric($option['size'])) continue;
+            $number = (float) $option['size'];
             if ($number < 1 || $number > 20) continue;
             $label = rtrim(rtrim(number_format($number, 2, '.', ''), '0'), '.');
-            $sizes[$label] = $label;
+            $options[$label] = [
+                'surcharge' => max(0.0, (float) ($option['surcharge'] ?? 0)),
+                'stocked' => (bool) ($option['stocked'] ?? false),
+            ];
         }
-        uksort($sizes, static fn(string $a, string $b): int => (float) $a <=> (float) $b);
-        return array_values($sizes);
+        uksort($options, static fn(string $a, string $b): int => (float) $a <=> (float) $b);
+        return $options;
     }
 
     private function prepare_catalog_row(array $row): array
