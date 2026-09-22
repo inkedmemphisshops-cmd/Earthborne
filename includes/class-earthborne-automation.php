@@ -48,6 +48,9 @@ final class Earthborne_Automation
             'earthborne_stuller_password' => 'sanitize_text_field',
             'earthborne_availability_path' => 'sanitize_text_field',
             'earthborne_order_path' => 'sanitize_text_field',
+            'earthborne_stuller_store_number' => 'sanitize_text_field',
+            'earthborne_stuller_order_type' => 'sanitize_text_field',
+            'earthborne_stuller_oos_type' => 'sanitize_text_field',
             'earthborne_markup' => 'floatval',
             'earthborne_dry_run' => 'rest_sanitize_boolean',
             'earthborne_auto_fulfillment' => 'rest_sanitize_boolean',
@@ -69,8 +72,11 @@ final class Earthborne_Automation
                 <?php $this->input('earthborne_stuller_base_url', 'Stuller API base URL', 'url'); ?>
                 <?php $this->input('earthborne_stuller_username', 'API username'); ?>
                 <?php $this->input('earthborne_stuller_password', 'API password', 'password'); ?>
-                <?php $this->input('earthborne_availability_path', 'Availability endpoint path'); ?>
-                <?php $this->input('earthborne_order_path', 'Order endpoint path'); ?>
+                <?php $this->input('earthborne_availability_path', 'Product endpoint path', 'text', '/v2/products'); ?>
+                <?php $this->input('earthborne_order_path', 'Order endpoint path', 'text', '/v2/orders/submitorder'); ?>
+                <?php $this->input('earthborne_stuller_store_number', 'Stuller store number'); ?>
+                <?php $this->input('earthborne_stuller_order_type', 'Stuller order type', 'text', 'PACKANDSHIP'); ?>
+                <?php $this->input('earthborne_stuller_oos_type', 'Out-of-stock instruction', 'text', 'Backorder'); ?>
                 <?php $this->input('earthborne_markup', 'Retail markup', 'number', '2.0', 'step="0.01" min="1"'); ?>
                 <?php $this->checkbox('earthborne_dry_run', 'Dry-run mode', true); ?>
                 <?php $this->checkbox('earthborne_auto_fulfillment', 'Enable automatic fulfillment', false); ?>
@@ -133,6 +139,12 @@ final class Earthborne_Automation
                     }
                     $product->update_meta_data('_earthborne_last_sync_utc', gmdate('c'));
                     $product->update_meta_data('_earthborne_source_status', $available ? 'available' : 'unavailable');
+                    $product->update_meta_data('_earthborne_source_cost', $row['cost'] ?? null);
+                    $product->update_meta_data('_earthborne_stuller_product_id', $row['product_id'] ?? null);
+                    $product->update_meta_data('_earthborne_stuller_categories', $row['categories'] ?? []);
+                    $product->update_meta_data('_earthborne_stuller_attributes', $row['attributes'] ?? []);
+                    $product->update_meta_data('_earthborne_stuller_images', $row['images'] ?? []);
+                    $product->update_meta_data('_earthborne_stuller_configuration', $row['configuration'] ?? []);
                     $product->save();
                 }
             }
@@ -148,7 +160,20 @@ final class Earthborne_Automation
         if (!$order || $order->get_meta('_earthborne_stuller_submission_id') !== '') return;
         if (!(bool) get_option('earthborne_auto_fulfillment', false)) return;
 
-        $payload = ['merchant_order_id' => (string) $order_id, 'items' => []];
+        $shipping = $order->get_address('shipping');
+        $billing = $order->get_address('billing');
+        $shipping['name'] = trim(($shipping['first_name'] ?? '') . ' ' . ($shipping['last_name'] ?? ''));
+        $billing['name'] = trim(($billing['first_name'] ?? '') . ' ' . ($billing['last_name'] ?? ''));
+        $payload = [
+            'merchant_order_id' => (string) $order_id,
+            'purchase_order_number' => (string) $order->get_order_number(),
+            'created_at' => $order->get_date_created() ? $order->get_date_created()->date(DATE_ATOM) : gmdate('c'),
+            'email' => (string) $order->get_billing_email(),
+            'phone' => (string) $order->get_billing_phone(),
+            'shipping' => $shipping,
+            'billing' => $billing,
+            'items' => [],
+        ];
         foreach ($order->get_items() as $item) {
             $product = $item->get_product();
             if (!$product || $product->get_sku() === '') continue;
@@ -163,7 +188,8 @@ final class Earthborne_Automation
 
         try {
             $result = $this->client()->submit_order($payload);
-            $submission_id = (string) apply_filters('earthborne_extract_stuller_order_id', '', $result);
+            $submission_id = $this->client()->extract_order_confirmation($result);
+            $submission_id = (string) apply_filters('earthborne_extract_stuller_order_id', $submission_id, $result);
             if ($submission_id === '') throw new RuntimeException('Stuller response mapping did not provide an order ID.');
             $order->update_meta_data('_earthborne_stuller_submission_id', $submission_id);
             $order->save();
