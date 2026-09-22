@@ -1,0 +1,2 @@
+sku,name,stone_type,shape,carat_weight,natural,stuller_cost,approved_retail_price,quantity,availability,image_urls,description
+EXAMPLE-SKU,Natural Example Stone,Example,Oval,1.25,yes,100.00,,1,available,https://example.invalid/front.jpg|https://example.invalid/side.jpg,Replace this example row before import
