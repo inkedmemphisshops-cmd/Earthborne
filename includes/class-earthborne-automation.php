@@ -33,6 +33,8 @@ final class Earthborne_Automation
         add_action('admin_menu', [$this, 'admin_menu']);
         add_action('admin_init', [$this, 'register_settings']);
         add_action('admin_post_earthborne_run_sync', [$this, 'manual_sync']);
+        add_action('admin_post_earthborne_preview_catalog', [$this, 'preview_catalog']);
+        add_action('admin_post_earthborne_populate_catalog', [$this, 'populate_catalog']);
     }
 
     public function admin_menu(): void
@@ -85,8 +87,181 @@ final class Earthborne_Automation
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
             <input type="hidden" name="action" value="earthborne_run_sync"><?php wp_nonce_field('earthborne_run_sync'); ?>
             <?php submit_button('Run inventory sync now', 'secondary'); ?>
-        </form></div>
+        </form>
+        <hr>
+        <h2>Catalog population</h2>
+        <p>Paste up to 50 exact Stuller SKUs. Previewing does not change products. Population is blocked until the preview succeeds and you type <code>POPULATE</code>.</p>
+        <?php $this->catalog_notice(); ?>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+            <input type="hidden" name="action" value="earthborne_preview_catalog"><?php wp_nonce_field('earthborne_preview_catalog'); ?>
+            <p><label for="earthborne_catalog_skus"><strong>Exact SKUs</strong></label></p>
+            <textarea class="large-text code" rows="7" id="earthborne_catalog_skus" name="earthborne_catalog_skus" placeholder="One SKU per line or comma-separated"></textarea>
+            <?php submit_button('Preview catalog batch', 'secondary'); ?>
+        </form>
+        <?php $this->catalog_preview(); ?>
+        </div>
         <?php
+    }
+
+    private function catalog_notice(): void
+    {
+        $code = sanitize_key((string) ($_GET['catalog_result'] ?? ''));
+        $messages = [
+            'ready' => ['notice-info', 'Preview ready. Review every row before population.'],
+            'done' => ['notice-success', 'Catalog batch completed.'],
+            'blocked' => ['notice-error', 'Population blocked: type POPULATE exactly.'],
+            'expired' => ['notice-error', 'Preview expired. Preview the SKUs again.'],
+            'failed' => ['notice-error', 'Catalog request failed. Check the WooCommerce logs for details.'],
+        ];
+        if (!isset($messages[$code])) return;
+        printf('<div class="notice %1$s inline"><p>%2$s</p></div>', esc_attr($messages[$code][0]), esc_html($messages[$code][1]));
+    }
+
+    private function catalog_preview(): void
+    {
+        $preview = get_transient($this->preview_key());
+        if (!is_array($preview) || empty($preview['rows'])) return;
+        echo '<h3>Prepared batch</h3><table class="widefat striped"><thead><tr><th>SKU</th><th>Name</th><th>Cost</th><th>Retail</th><th>Stock</th><th>Decision</th></tr></thead><tbody>';
+        foreach ($preview['rows'] as $row) {
+            printf('<tr><td><code>%1$s</code></td><td>%2$s</td><td>%3$s</td><td>%4$s</td><td>%5$d</td><td>%6$s</td></tr>', esc_html($row['sku']), esc_html($row['name']), esc_html($row['cost'] === null ? '—' : wp_strip_all_tags(wc_price($row['cost']))), esc_html($row['retail'] === null ? '—' : wp_strip_all_tags(wc_price($row['retail']))), (int) $row['quantity'], esc_html($row['decision']));
+        }
+        echo '</tbody></table>';
+        ?>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:16px">
+            <input type="hidden" name="action" value="earthborne_populate_catalog"><?php wp_nonce_field('earthborne_populate_catalog'); ?>
+            <p><label for="earthborne_population_confirmation"><strong>Type POPULATE to create/update only the rows marked Ready</strong></label></p>
+            <input id="earthborne_population_confirmation" name="earthborne_population_confirmation" type="text" autocomplete="off">
+            <?php submit_button('Populate this batch', 'primary'); ?>
+        </form>
+        <?php
+    }
+
+    public function preview_catalog(): void
+    {
+        $this->authorize_admin_post('earthborne_preview_catalog');
+        $raw = sanitize_textarea_field(wp_unslash((string) ($_POST['earthborne_catalog_skus'] ?? '')));
+        $skus = array_values(array_unique(array_filter(array_map('trim', preg_split('/[\s,]+/', $raw) ?: []))));
+        $skus = array_slice($skus, 0, 50);
+        if ($skus === []) $this->catalog_redirect('failed');
+
+        try {
+            $rows = array_map([$this, 'prepare_catalog_row'], $this->client()->fetch_catalog($skus));
+            set_transient($this->preview_key(), ['created' => time(), 'rows' => $rows], 30 * MINUTE_IN_SECONDS);
+            $this->catalog_redirect('ready');
+        } catch (Throwable $error) {
+            $this->log('Catalog preview failed: ' . $error->getMessage(), 'error');
+            $this->catalog_redirect('failed');
+        }
+    }
+
+    public function populate_catalog(): void
+    {
+        $this->authorize_admin_post('earthborne_populate_catalog');
+        if (sanitize_text_field(wp_unslash((string) ($_POST['earthborne_population_confirmation'] ?? ''))) !== 'POPULATE') {
+            $this->catalog_redirect('blocked');
+        }
+        $preview = get_transient($this->preview_key());
+        if (!is_array($preview) || empty($preview['rows'])) $this->catalog_redirect('expired');
+
+        $counts = ['created' => 0, 'updated' => 0, 'skipped' => 0, 'failed' => 0];
+        foreach ($preview['rows'] as $row) {
+            if (($row['decision'] ?? '') !== 'Ready') { $counts['skipped']++; continue; }
+            try {
+                $existing_id = wc_get_product_id_by_sku($row['sku']);
+                $product = $existing_id ? wc_get_product($existing_id) : new WC_Product_Simple();
+                if (!$product) throw new RuntimeException('Could not load product.');
+                $product->set_name($row['name'] !== '' ? $row['name'] : $row['sku']);
+                $product->set_sku($row['sku']);
+                $product->set_status('publish');
+                $product->set_catalog_visibility('visible');
+                $product->set_description(wp_kses_post($row['description']));
+                $product->set_short_description(wp_kses_post($row['short_description']));
+                $product->set_regular_price((string) $row['retail']);
+                $product->set_manage_stock(true);
+                $product->set_stock_quantity((int) $row['quantity']);
+                $product->set_stock_status('instock');
+                $product->set_category_ids($this->category_ids($row['earthborne_categories']));
+                $product->update_meta_data('_earthborne_managed', 'yes');
+                $product->update_meta_data('_earthborne_source_cost', $row['cost']);
+                $product->update_meta_data('_earthborne_stuller_product_id', $row['product_id']);
+                $product->update_meta_data('_earthborne_stuller_attributes', $row['attributes']);
+                $product->update_meta_data('_earthborne_stuller_images', $row['images']);
+                $product->update_meta_data('_earthborne_last_sync_utc', gmdate('c'));
+                $product_id = $product->save();
+                $this->attach_images($product, $row['images']);
+                $existing_id ? $counts['updated']++ : $counts['created']++;
+                $this->log(sprintf('Catalog %s SKU %s as product %d.', $existing_id ? 'updated' : 'created', $row['sku'], $product_id), 'info');
+            } catch (Throwable $error) {
+                $counts['failed']++;
+                $this->log('Catalog SKU ' . ($row['sku'] ?? '?') . ' failed: ' . $error->getMessage(), 'error');
+            }
+        }
+        delete_transient($this->preview_key());
+        $this->log('Catalog batch result: ' . wp_json_encode($counts), $counts['failed'] ? 'warning' : 'info');
+        $this->catalog_redirect('done');
+    }
+
+    private function prepare_catalog_row(array $row): array
+    {
+        $text = strtolower(wp_json_encode([$row['name'] ?? '', $row['description'] ?? '', $row['attributes'] ?? []]) ?: '');
+        $decision = 'Ready';
+        if (empty($row['available']) || (int) ($row['quantity'] ?? 0) < 1) $decision = 'Skip: out of stock';
+        elseif (($row['cost'] ?? null) === null || (float) $row['cost'] <= 0) $decision = 'Skip: missing cost';
+        elseif (str_contains($text, 'pearl')) $decision = 'Skip: pearl';
+        elseif (str_contains($text, 'lab-grown') || str_contains($text, 'lab grown') || str_contains($text, 'laboratory grown')) $decision = 'Skip: lab-grown stone';
+        elseif (($row['product_type'] ?? '') === 'Ring' && empty($row['ring_sizable']) && empty($row['ring_sizes'])) $decision = 'Skip: single-size ring';
+        $row['retail'] = isset($row['cost']) ? round((float) $row['cost'] * max(1.0, (float) get_option('earthborne_markup', 2.0)), 2) : null;
+        $row['decision'] = $decision;
+        $row['earthborne_categories'] = array_values(array_unique(array_merge(['Ready Made Jewelry'], $row['earthborne_categories'] ?? [])));
+        return $row;
+    }
+
+    private function category_ids(array $names): array
+    {
+        $ids = [];
+        foreach ($names as $name) {
+            $term = term_exists($name, 'product_cat');
+            if (!$term) $term = wp_insert_term($name, 'product_cat');
+            if (!is_wp_error($term)) $ids[] = (int) (is_array($term) ? $term['term_id'] : $term);
+        }
+        return array_values(array_unique($ids));
+    }
+
+    private function attach_images(WC_Product $product, array $images): void
+    {
+        if ($product->get_image_id() || $images === []) return;
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        require_once ABSPATH . 'wp-admin/includes/media.php';
+        require_once ABSPATH . 'wp-admin/includes/image.php';
+        $ids = [];
+        foreach (array_slice($images, 0, 8) as $image) {
+            $url = esc_url_raw((string) ($image['url'] ?? ''));
+            if ($url === '') continue;
+            $id = media_sideload_image($url, $product->get_id(), $product->get_name(), 'id');
+            if (!is_wp_error($id)) $ids[] = (int) $id;
+        }
+        if ($ids !== []) {
+            $product->set_image_id(array_shift($ids));
+            $product->set_gallery_image_ids($ids);
+            $product->save();
+        }
+    }
+
+    private function authorize_admin_post(string $nonce): void
+    {
+        if (!current_user_can('manage_woocommerce')) wp_die('Not allowed.');
+        check_admin_referer($nonce);
+    }
+
+    private function preview_key(): string
+    {
+        return 'earthborne_catalog_preview_' . get_current_user_id();
+    }
+
+    private function catalog_redirect(string $result): never
+    {
+        wp_safe_redirect(add_query_arg(['page' => 'earthborne-automation', 'catalog_result' => $result], admin_url('admin.php')));
+        exit;
     }
 
     private function input(string $name, string $label, string $type = 'text', string $default = '', string $extra = ''): void
