@@ -234,8 +234,8 @@ final class Earthborne_Automation
         foreach ($sizes as $size) {
             $option = $size_options[$size];
             $surcharge = (float) $option['surcharge'];
-            $variation_cost = (float) $row['cost'] + $surcharge;
-            $variation_price = round($variation_cost * $markup, 2);
+            $merchandise_cost = (float) $row['cost'];
+            $variation_price = round(($merchandise_cost * $markup) + $surcharge, 2);
             $variation = $existing[$size] ?? new WC_Product_Variation();
             $variation->set_parent_id($product_id);
             $variation->set_status('publish');
@@ -247,8 +247,9 @@ final class Earthborne_Automation
             $variation->update_meta_data('_earthborne_stuller_sku', $row['sku']);
             $variation->update_meta_data('_earthborne_ring_size', $size);
             $variation->update_meta_data('_earthborne_ring_size_surcharge', $surcharge);
+            $variation->update_meta_data('_earthborne_stuller_service_cost', $surcharge);
             $variation->update_meta_data('_earthborne_ring_size_stocked', !empty($option['stocked']) ? 'yes' : 'no');
-            $variation->update_meta_data('_earthborne_source_cost', $variation_cost);
+            $variation->update_meta_data('_earthborne_source_cost', $merchandise_cost);
             $variation->save();
         }
 
