@@ -168,26 +168,9 @@ final class Earthborne_Automation
             if (($row['decision'] ?? '') !== 'Ready') { $counts['skipped']++; continue; }
             try {
                 $existing_id = wc_get_product_id_by_sku($row['sku']);
-                $product = $existing_id ? wc_get_product($existing_id) : new WC_Product_Simple();
-                if (!$product) throw new RuntimeException('Could not load product.');
-                $product->set_name($row['name'] !== '' ? $row['name'] : $row['sku']);
-                $product->set_sku($row['sku']);
-                $product->set_status('publish');
-                $product->set_catalog_visibility('visible');
-                $product->set_description(wp_kses_post($row['description']));
-                $product->set_short_description(wp_kses_post($row['short_description']));
-                $product->set_regular_price((string) $row['retail']);
-                $product->set_manage_stock(true);
-                $product->set_stock_quantity((int) $row['quantity']);
-                $product->set_stock_status('instock');
-                $product->set_category_ids($this->category_ids($row['earthborne_categories']));
-                $product->update_meta_data('_earthborne_managed', 'yes');
-                $product->update_meta_data('_earthborne_source_cost', $row['cost']);
-                $product->update_meta_data('_earthborne_stuller_product_id', $row['product_id']);
-                $product->update_meta_data('_earthborne_stuller_attributes', $row['attributes']);
-                $product->update_meta_data('_earthborne_stuller_images', $row['images']);
-                $product->update_meta_data('_earthborne_last_sync_utc', gmdate('c'));
-                $product_id = $product->save();
+                $product_id = $this->save_catalog_product($row, $existing_id);
+                $product = wc_get_product($product_id);
+                if (!$product) throw new RuntimeException('Could not reload saved product.');
                 $this->attach_images($product, $row['images']);
                 $existing_id ? $counts['updated']++ : $counts['created']++;
                 $this->log(sprintf('Catalog %s SKU %s as product %d.', $existing_id ? 'updated' : 'created', $row['sku'], $product_id), 'info');
@@ -201,6 +184,125 @@ final class Earthborne_Automation
         $this->catalog_redirect('done');
     }
 
+    private function save_catalog_product(array $row, int $existing_id): int
+    {
+        if ($this->is_ring_row($row)) {
+            return $this->save_ring_product($row, $existing_id);
+        }
+
+        $product = $existing_id ? wc_get_product($existing_id) : new WC_Product_Simple();
+        if (!$product) throw new RuntimeException('Could not load product.');
+        $this->apply_catalog_fields($product, $row);
+        return $product->save();
+    }
+
+    private function save_ring_product(array $row, int $existing_id): int
+    {
+        $sizes = $this->normalized_ring_sizes($row);
+        if ($sizes === []) throw new RuntimeException('Ring has no selectable sizes.');
+
+        if ($existing_id) {
+            wp_set_object_terms($existing_id, 'variable', 'product_type');
+            $product = new WC_Product_Variable($existing_id);
+        } else {
+            $product = new WC_Product_Variable();
+        }
+
+        $this->apply_catalog_fields($product, $row);
+        $product->set_manage_stock(false);
+
+        $attribute = new WC_Product_Attribute();
+        $attribute->set_id(0);
+        $attribute->set_name('Ring size');
+        $attribute->set_options($sizes);
+        $attribute->set_position(0);
+        $attribute->set_visible(true);
+        $attribute->set_variation(true);
+        $product->set_attributes([$attribute]);
+
+        $product_id = $product->save();
+        $existing = [];
+        foreach ($product->get_children() as $child_id) {
+            $variation = wc_get_product($child_id);
+            if (!$variation) continue;
+            $size = (string) $variation->get_meta('_earthborne_ring_size');
+            if ($size !== '') $existing[$size] = $variation;
+        }
+
+        foreach ($sizes as $size) {
+            $variation = $existing[$size] ?? new WC_Product_Variation();
+            $variation->set_parent_id($product_id);
+            $variation->set_status('publish');
+            $variation->set_attributes(['ring-size' => $size]);
+            $variation->set_regular_price((string) $row['retail']);
+            $variation->set_manage_stock(false);
+            $variation->set_stock_status('instock');
+            $variation->update_meta_data('_earthborne_managed', 'yes');
+            $variation->update_meta_data('_earthborne_stuller_sku', $row['sku']);
+            $variation->update_meta_data('_earthborne_ring_size', $size);
+            $variation->update_meta_data('_earthborne_source_cost', $row['cost']);
+            $variation->save();
+        }
+
+        foreach ($existing as $size => $variation) {
+            if (!in_array($size, $sizes, true)) {
+                $variation->set_status('private');
+                $variation->save();
+            }
+        }
+
+        WC_Product_Variable::sync($product_id);
+        wc_delete_product_transients($product_id);
+        return $product_id;
+    }
+
+    private function apply_catalog_fields(WC_Product $product, array $row): void
+    {
+        $product->set_name($row['name'] !== '' ? $row['name'] : $row['sku']);
+        $product->set_sku($row['sku']);
+        $product->set_status('publish');
+        $product->set_catalog_visibility('visible');
+        $product->set_description(wp_kses_post($row['description']));
+        $product->set_short_description(wp_kses_post($row['short_description']));
+        $product->set_regular_price((string) $row['retail']);
+        $product->set_manage_stock(true);
+        $product->set_stock_quantity((int) $row['quantity']);
+        $product->set_stock_status('instock');
+        $product->set_category_ids($this->category_ids($row['earthborne_categories']));
+        $product->update_meta_data('_earthborne_managed', 'yes');
+        $product->update_meta_data('_earthborne_source_cost', $row['cost']);
+        $product->update_meta_data('_earthborne_stuller_product_id', $row['product_id']);
+        $product->update_meta_data('_earthborne_stuller_attributes', $row['attributes']);
+        $product->update_meta_data('_earthborne_stuller_images', $row['images']);
+        $product->update_meta_data('_earthborne_ring_sizes', $row['ring_sizes'] ?? []);
+        $product->update_meta_data('_earthborne_last_sync_utc', gmdate('c'));
+    }
+
+    private function is_ring_row(array $row): bool
+    {
+        $text = strtolower(wp_json_encode([
+            $row['product_type'] ?? '',
+            $row['name'] ?? '',
+            $row['categories'] ?? [],
+            $row['attributes'] ?? [],
+        ]) ?: '');
+        return str_contains($text, 'ring');
+    }
+
+    private function normalized_ring_sizes(array $row): array
+    {
+        $sizes = [];
+        foreach (($row['ring_sizes'] ?? []) as $size) {
+            if (!is_numeric($size)) continue;
+            $number = (float) $size;
+            if ($number < 1 || $number > 20) continue;
+            $label = rtrim(rtrim(number_format($number, 2, '.', ''), '0'), '.');
+            $sizes[$label] = $label;
+        }
+        uksort($sizes, static fn(string $a, string $b): int => (float) $a <=> (float) $b);
+        return array_values($sizes);
+    }
+
     private function prepare_catalog_row(array $row): array
     {
         $text = strtolower(wp_json_encode([$row['name'] ?? '', $row['description'] ?? '', $row['attributes'] ?? []]) ?: '');
@@ -209,7 +311,7 @@ final class Earthborne_Automation
         elseif (($row['cost'] ?? null) === null || (float) $row['cost'] <= 0) $decision = 'Skip: missing cost';
         elseif (str_contains($text, 'pearl')) $decision = 'Skip: pearl';
         elseif (str_contains($text, 'lab-grown') || str_contains($text, 'lab grown') || str_contains($text, 'laboratory grown')) $decision = 'Skip: lab-grown stone';
-        elseif (($row['product_type'] ?? '') === 'Ring' && empty($row['ring_sizable']) && empty($row['ring_sizes'])) $decision = 'Skip: single-size ring';
+        elseif ($this->is_ring_row($row) && $this->normalized_ring_sizes($row) === []) $decision = 'Skip: ring without selectable sizes';
         $row['retail'] = isset($row['cost']) ? round((float) $row['cost'] * max(1.0, (float) get_option('earthborne_markup', 2.0)), 2) : null;
         $row['decision'] = $decision;
         $row['earthborne_categories'] = array_values(array_unique(array_merge(['Ready Made Jewelry'], $row['earthborne_categories'] ?? [])));
@@ -351,8 +453,22 @@ final class Earthborne_Automation
         ];
         foreach ($order->get_items() as $item) {
             $product = $item->get_product();
-            if (!$product || $product->get_sku() === '') continue;
-            $payload['items'][] = ['sku' => $product->get_sku(), 'quantity' => $item->get_quantity()];
+            if (!$product) continue;
+            $sku = $product->get_sku();
+            if ($sku === '' && $product->is_type('variation')) {
+                $sku = (string) $product->get_meta('_earthborne_stuller_sku');
+                if ($sku === '') {
+                    $parent = wc_get_product($product->get_parent_id());
+                    $sku = $parent ? $parent->get_sku() : '';
+                }
+            }
+            if ($sku === '') continue;
+            $payload_item = ['sku' => $sku, 'quantity' => $item->get_quantity()];
+            if ($product->is_type('variation')) {
+                $ring_size = (string) $product->get_meta('_earthborne_ring_size');
+                if ($ring_size !== '' && is_numeric($ring_size)) $payload_item['ring_size'] = (float) $ring_size;
+            }
+            $payload['items'][] = $payload_item;
         }
         if ($payload['items'] === []) return;
 
