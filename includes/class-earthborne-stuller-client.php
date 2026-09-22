@@ -56,6 +56,23 @@ final class Earthborne_Stuller_Client
         return $rows;
     }
 
+    public function fetch_series(string $series): array
+    {
+        $series = trim($series);
+        if ($series === '') throw new InvalidArgumentException('Series is required.');
+        $path = (string) get_option('earthborne_availability_path', '/v2/products');
+        $query = http_build_query([
+            'Series' => $series,
+            'Include' => 'All',
+            'Page' => 1,
+            'PageSize' => 100,
+        ], '', '&', PHP_QUERY_RFC3986);
+        $response = $this->request('GET', $path . '?' . $query);
+        $rows = $this->mapper->map_catalog_response($response, 'products');
+        if (!is_array($rows)) throw new UnexpectedValueException('Series mapping must return an array.');
+        return $rows;
+    }
+
     public function submit_order(array $payload): array
     {
         $path = (string) get_option('earthborne_order_path', '/v2/orders/submitorder');

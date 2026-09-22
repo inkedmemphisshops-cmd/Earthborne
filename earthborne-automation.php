@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Earthborne Commerce Automation
  * Description: Safe Stuller availability, pricing, and fulfillment automation for WooCommerce.
- * Version: 0.3.2
+ * Version: 0.3.3
  * Author: Earthborne Jewelry
  * Requires at least: 6.5
  * Requires PHP: 8.1
@@ -11,7 +11,7 @@
 
 defined('ABSPATH') || exit;
 
-define('EARTHBORNE_AUTOMATION_VERSION', '0.3.2');
+define('EARTHBORNE_AUTOMATION_VERSION', '0.3.3');
 define('EARTHBORNE_AUTOMATION_FILE', __FILE__);
 define('EARTHBORNE_AUTOMATION_DIR', plugin_dir_path(__FILE__));
 

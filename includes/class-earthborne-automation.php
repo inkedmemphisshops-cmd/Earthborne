@@ -35,6 +35,38 @@ final class Earthborne_Automation
         add_action('admin_post_earthborne_run_sync', [$this, 'manual_sync']);
         add_action('admin_post_earthborne_preview_catalog', [$this, 'preview_catalog']);
         add_action('admin_post_earthborne_populate_catalog', [$this, 'populate_catalog']);
+        add_action('rest_api_init', [$this, 'register_rest_routes']);
+    }
+
+    public function register_rest_routes(): void
+    {
+        register_rest_route('earthborne/v1', '/import-ring-series', [
+            'methods' => 'POST',
+            'permission_callback' => static fn(): bool => current_user_can('manage_woocommerce'),
+            'callback' => [$this, 'rest_import_ring_series'],
+            'args' => [
+                'series' => ['required' => true, 'type' => 'array', 'items' => ['type' => 'string']],
+            ],
+        ]);
+    }
+
+    public function rest_import_ring_series(WP_REST_Request $request): WP_REST_Response|WP_Error
+    {
+        $series = array_slice(array_values(array_unique(array_filter(array_map(
+            static fn($value): string => sanitize_text_field((string) $value),
+            (array) $request->get_param('series')
+        )))), 0, 5);
+        if ($series === []) return new WP_Error('missing_series', 'Provide one to five Stuller series.', ['status' => 400]);
+
+        $results = [];
+        foreach ($series as $number) {
+            try {
+                $results[] = $this->save_ring_series($number, $this->client()->fetch_series($number));
+            } catch (Throwable $error) {
+                $results[] = ['series' => $number, 'error' => $error->getMessage()];
+            }
+        }
+        return rest_ensure_response(['processed' => count($results), 'results' => $results]);
     }
 
     public function admin_menu(): void
@@ -54,6 +86,7 @@ final class Earthborne_Automation
             'earthborne_stuller_order_type' => 'sanitize_text_field',
             'earthborne_stuller_oos_type' => 'sanitize_text_field',
             'earthborne_markup' => 'floatval',
+            'earthborne_metal_markup' => 'floatval',
             'earthborne_dry_run' => 'rest_sanitize_boolean',
             'earthborne_auto_fulfillment' => 'rest_sanitize_boolean',
         ];
@@ -80,6 +113,7 @@ final class Earthborne_Automation
                 <?php $this->input('earthborne_stuller_order_type', 'Stuller order type', 'text', 'PACKANDSHIP'); ?>
                 <?php $this->input('earthborne_stuller_oos_type', 'Out-of-stock instruction', 'text', 'Backorder'); ?>
                 <?php $this->input('earthborne_markup', 'Retail markup', 'number', '2.0', 'step="0.01" min="1"'); ?>
+                <?php $this->input('earthborne_metal_markup', 'Metal merchandise markup', 'number', '1.5', 'step="0.01" min="1"'); ?>
                 <?php $this->checkbox('earthborne_dry_run', 'Dry-run mode', true); ?>
                 <?php $this->checkbox('earthborne_auto_fulfillment', 'Enable automatic fulfillment', false); ?>
             </table><?php submit_button(); ?>
@@ -196,6 +230,102 @@ final class Earthborne_Automation
         return $product->save();
     }
 
+    private function save_ring_series(string $series, array $rows): array
+    {
+        $approved = [];
+        foreach ($rows as $row) {
+            if (empty($row['orderable']) || ($row['cost'] ?? 0) <= 0 || !$this->is_ring_row($row)) continue;
+            $text = strtolower(wp_json_encode([$row['name'] ?? '', $row['description'] ?? '', $row['attributes'] ?? []]) ?: '');
+            if (str_contains($text, 'pearl') || str_contains($text, 'lab-grown') || str_contains($text, 'lab grown')) continue;
+            $finish = strtolower((string) ($row['attributes']['Finished State'] ?? $row['attributes']['Finish State'] ?? ''));
+            if ($finish !== '' && !str_contains($finish, 'polish')) continue;
+            $metal = trim((string) ($row['attributes']['Quality'] ?? ''));
+            $sizes = $this->normalized_ring_size_options($row);
+            if ($metal === '' || count($sizes) < 2) continue;
+            $approved[] = ['row' => $row, 'metal' => $metal, 'sizes' => $sizes];
+        }
+        if ($approved === []) throw new RuntimeException('No orderable metal and size combinations were found.');
+
+        $parent_sku = 'EB-RING-' . sanitize_title($series);
+        $parent_id = wc_get_product_id_by_sku($parent_sku);
+        $parent = $parent_id ? new WC_Product_Variable($parent_id) : new WC_Product_Variable();
+        $first = $approved[0]['row'];
+        $name = preg_replace('/^(10K|14K|18K|Platinum|Palladium|Sterling Silver)\s+(Rose|White|Yellow|Palladium White)?\s*(Gold)?\s*/i', '', (string) ($first['name'] ?: 'Custom Ring'));
+        $parent->set_name(trim((string) $name));
+        if (!$parent_id) $parent->set_sku($parent_sku);
+        $parent->set_status('publish');
+        $parent->set_catalog_visibility('visible');
+        $parent->set_manage_stock(false);
+        $parent->set_stock_status('instock');
+        $parent->set_category_ids($this->category_ids(['Rings', 'One-of-a-Kind & Ready-Made Jewelry']));
+        $parent->set_short_description('<p>Custom ring with selectable metal and ring size.</p>');
+        $parent->set_description('<p>This is a custom item. Please allow approximately 8 days for Stuller production before shipment.</p>');
+
+        $metals = array_values(array_unique(array_map(static fn(array $item): string => $item['metal'], $approved)));
+        $sizes = [];
+        foreach ($approved as $item) $sizes = array_merge($sizes, array_keys($item['sizes']));
+        $sizes = array_values(array_unique($sizes));
+        usort($sizes, static fn(string $a, string $b): int => (float) $a <=> (float) $b);
+
+        $metal_attribute = new WC_Product_Attribute();
+        $metal_attribute->set_name('Metal');
+        $metal_attribute->set_options($metals);
+        $metal_attribute->set_visible(true);
+        $metal_attribute->set_variation(true);
+        $metal_attribute->set_position(0);
+        $size_attribute = new WC_Product_Attribute();
+        $size_attribute->set_name('Ring size');
+        $size_attribute->set_options($sizes);
+        $size_attribute->set_visible(true);
+        $size_attribute->set_variation(true);
+        $size_attribute->set_position(1);
+        $parent->set_attributes([$metal_attribute, $size_attribute]);
+        $parent_id = $parent->save();
+
+        $existing = [];
+        foreach ($parent->get_children() as $child_id) {
+            $variation = wc_get_product($child_id);
+            if (!$variation) continue;
+            $key = (string) $variation->get_meta('_earthborne_option_key');
+            if ($key !== '') $existing[$key] = $variation;
+        }
+
+        $markup = max(1.0, (float) get_option('earthborne_metal_markup', 1.5));
+        $active = [];
+        foreach ($approved as $item) {
+            foreach ($item['sizes'] as $size => $option) {
+                $key = sanitize_title($item['metal']) . '|' . $size;
+                $service = (float) $option['surcharge'];
+                $price = round(((float) $item['row']['cost'] * $markup) + $service, 2);
+                $variation = $existing[$key] ?? new WC_Product_Variation();
+                $variation->set_parent_id($parent_id);
+                $variation->set_status('publish');
+                $variation->set_attributes(['metal' => $item['metal'], 'ring-size' => $size]);
+                $variation->set_regular_price((string) $price);
+                $variation->set_manage_stock(false);
+                $variation->set_stock_status('instock');
+                $variation->update_meta_data('_earthborne_option_key', $key);
+                $variation->update_meta_data('_earthborne_stuller_sku', $item['row']['sku']);
+                $variation->update_meta_data('_earthborne_ring_size', $size);
+                $variation->update_meta_data('_earthborne_stuller_service_cost', $service);
+                $variation->update_meta_data('_earthborne_source_cost', (float) $item['row']['cost']);
+                $variation->update_meta_data('_earthborne_ring_size_stocked', !empty($option['stocked']) ? 'yes' : 'no');
+                $variation->save();
+                $active[$key] = true;
+            }
+        }
+        foreach ($existing as $key => $variation) if (!isset($active[$key])) {
+            $variation->set_status('private');
+            $variation->save();
+        }
+
+        $parent = wc_get_product($parent_id);
+        if ($parent) $this->attach_images($parent, $first['images'] ?? []);
+        WC_Product_Variable::sync($parent_id);
+        wc_delete_product_transients($parent_id);
+        return ['series' => $series, 'parent_id' => $parent_id, 'metals' => count($metals), 'sizes' => count($sizes), 'variations' => count($active)];
+    }
+
     private function save_ring_product(array $row, int $existing_id): int
     {
         $size_options = $this->normalized_ring_size_options($row);
@@ -230,7 +360,7 @@ final class Earthborne_Automation
             if ($size !== '') $existing[$size] = $variation;
         }
 
-        $markup = max(1.0, (float) get_option('earthborne_markup', 2.0));
+        $markup = max(1.0, (float) get_option('earthborne_metal_markup', 1.5));
         foreach ($sizes as $size) {
             $option = $size_options[$size];
             $surcharge = (float) $option['surcharge'];
