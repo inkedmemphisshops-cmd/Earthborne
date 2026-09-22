@@ -11,6 +11,7 @@ Private operational code for Earthborne Jewelry's WooCommerce catalog.
 - configurable retail markup (default `2.0`);
 - automatic out-of-stock handling;
 - detailed per-product sync timestamps and status notes;
+- guarded catalog population from a previewed list of exact Stuller SKUs;
 - idempotent order submission so the same order cannot be sent twice;
 - dry-run mode and an explicit fulfillment enable switch;
 - WooCommerce order notes and structured logs.
@@ -38,6 +39,15 @@ Automatic fulfillment is **off by default**. The plugin will not submit an order
 - Every synced product or variation must have the exact Stuller SKU in WooCommerce's SKU field.
 - Products without a SKU are skipped and logged.
 - `_earthborne_managed` may be set to `yes` to limit syncs to managed products.
+
+## Populate a catalog batch
+
+1. Open **WooCommerce → Earthborne Automation**.
+2. Paste up to 50 exact Stuller SKUs and choose **Preview catalog batch**.
+3. Review the cost, 2× retail price, stock, and decision for every row.
+4. Type `POPULATE` and choose **Populate this batch**.
+
+Only rows marked **Ready** are created or updated. The importer excludes out-of-stock items, missing-price items, pearls, lab-grown stones, and detected single-size rings. It assigns **Ready Made Jewelry**, transfers up to eight images, saves exact SKUs, and marks products for later inventory refresh. Population never runs on a schedule.
 
 ## Before production
 
