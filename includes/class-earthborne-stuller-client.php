@@ -7,12 +7,14 @@ final class Earthborne_Stuller_Client
     private string $base_url;
     private string $username;
     private string $password;
+    private Earthborne_Stuller_Mapper $mapper;
 
     public function __construct(array $settings)
     {
         $this->base_url = rtrim((string) ($settings['base_url'] ?? ''), '/');
         $this->username = (string) ($settings['username'] ?? '');
         $this->password = (string) ($settings['password'] ?? '');
+        $this->mapper = new Earthborne_Stuller_Mapper();
     }
 
     public function is_configured(): bool
@@ -22,16 +24,15 @@ final class Earthborne_Stuller_Client
 
     public function fetch_availability(array $skus): array
     {
-        $path = (string) get_option('earthborne_availability_path', '');
-        if ($path === '') {
-            throw new RuntimeException('The Stuller availability endpoint path is not configured.');
-        }
+        $path = (string) get_option('earthborne_availability_path', '/v2/products');
 
-        $response = $this->request('POST', $path, ['skus' => array_values($skus)]);
-
-        // ACCOUNT-SPECIFIC MAPPING: Use this filter to map Stuller's documented response
-        // to rows shaped as: sku, available (bool), quantity (int|null), cost (float|null).
-        $rows = apply_filters('earthborne_map_stuller_availability', [], $response, $skus);
+        $response = $this->request('POST', $path, [
+            'Include' => ['All'],
+            'Sku' => array_values($skus),
+            'Filter' => ['OnPriceList'],
+        ]);
+        $rows = $this->mapper->map_availability_response($response, $skus);
+        $rows = apply_filters('earthborne_map_stuller_availability', $rows, $response, $skus);
         if (!is_array($rows)) {
             throw new UnexpectedValueException('Availability mapping must return an array.');
         }
@@ -40,18 +41,24 @@ final class Earthborne_Stuller_Client
 
     public function submit_order(array $payload): array
     {
-        $path = (string) get_option('earthborne_order_path', '');
-        if ($path === '') {
-            throw new RuntimeException('The Stuller order endpoint path is not configured.');
-        }
+        $path = (string) get_option('earthborne_order_path', '/v2/orders/submitorder');
 
-        // ACCOUNT-SPECIFIC MAPPING: Transform the neutral WooCommerce payload using
-        // Stuller's current account documentation before enabling live fulfillment.
-        $mapped = apply_filters('earthborne_map_stuller_order_request', [], $payload);
+        $mapped = $this->mapper->map_order_request($payload, [
+            'test_mode' => (bool) get_option('earthborne_dry_run', true),
+            'store_number' => (string) get_option('earthborne_stuller_store_number', ''),
+            'order_type' => (string) get_option('earthborne_stuller_order_type', 'PACKANDSHIP'),
+            'if_oos_type' => (string) get_option('earthborne_stuller_oos_type', 'Backorder'),
+        ]);
+        $mapped = apply_filters('earthborne_map_stuller_order_request', $mapped, $payload);
         if (!is_array($mapped) || $mapped === []) {
             throw new RuntimeException('The Stuller order request mapping is not configured.');
         }
         return $this->request('POST', $path, $mapped);
+    }
+
+    public function extract_order_confirmation(array $response): string
+    {
+        return $this->mapper->extract_order_confirmation($response);
     }
 
     private function request(string $method, string $path, ?array $body = null): array
