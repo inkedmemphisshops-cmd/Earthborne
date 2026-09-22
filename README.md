@@ -41,7 +41,7 @@ Automatic fulfillment is **off by default**. The plugin will not submit an order
 
 ## Before production
 
-Obtain the current Stuller account API documentation and sample JSON for availability, pricing, and order submission. Complete the two mapping methods marked `ACCOUNT-SPECIFIC MAPPING` in `includes/class-earthborne-stuller-client.php`, then validate in a staging store with dry-run enabled.
+The plugin maps the documented Stuller v2 Product, Virtual Product, Gem, and Submit Order response shapes through `includes/class-earthborne-stuller-mapper.php`. Before production, validate the mapping against authenticated responses from Earthborne's account in a staging store with dry-run enabled. Account-specific differences can be adjusted with the existing WordPress filters.
 
 ## Deliberately excluded
 
