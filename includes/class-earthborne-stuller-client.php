@@ -39,6 +39,23 @@ final class Earthborne_Stuller_Client
         return $rows;
     }
 
+    public function fetch_catalog(array $skus): array
+    {
+        $path = (string) get_option('earthborne_availability_path', '/v2/products');
+        $response = $this->request('POST', $path, [
+            'Include' => ['All'],
+            'Sku' => array_values(array_unique(array_filter(array_map('strval', $skus)))),
+            'Filter' => ['OnPriceList'],
+        ]);
+
+        $rows = $this->mapper->map_catalog_response($response, 'products');
+        $rows = apply_filters('earthborne_map_stuller_catalog', $rows, $response, $skus);
+        if (!is_array($rows)) {
+            throw new UnexpectedValueException('Catalog mapping must return an array.');
+        }
+        return $rows;
+    }
+
     public function submit_order(array $payload): array
     {
         $path = (string) get_option('earthborne_order_path', '/v2/orders/submitorder');
